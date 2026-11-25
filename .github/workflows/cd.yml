@@ -1,0 +1,103 @@
+# CONTINUOUS DELIVERY: "is this version safe to release?"
+#
+#   CI passed on main -> staging -> smoke test -> YOUR APPROVAL -> production
+#
+# To ROLL BACK: Actions > CD > Run workflow, and enter the full SHA of an older
+# commit. Its images already exist, so nothing is rebuilt.
+
+name: CD
+
+on:
+  # Runs when CI finishes. GitHub uses the copy of this file on main, so a pull
+  # request cannot change how deployments work.
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: Full SHA of the commit to deploy (40 characters)
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  find-images:
+    name: Find images
+    # Continue only after a SUCCESSFUL CI run for a push to main, or a manual start.
+    # AZURE_READY is set by infra/setup-azure.ps1. Until then there is nowhere to deploy.
+    if: >-
+      vars.AZURE_READY == 'true' && github.ref == 'refs/heads/main' &&
+      (github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      commit: ${{ steps.images.outputs.commit }}
+      catalog: ${{ steps.images.outputs.catalog }}
+      orders: ${{ steps.images.outputs.orders }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # full history, to check that the commit is on main
+          persist-credentials: false
+
+      - name: Resolve the commit to image digests
+        id: images
+        env:
+          COMMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.commit || github.event.workflow_run.head_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Only deploy reviewed code: the commit must be part of main.
+          if [[ ! "$COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Enter the full 40-character commit SHA."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$COMMIT" HEAD; then
+            echo "::error::Commit $COMMIT is not on main."
+            exit 1
+          fi
+
+          echo "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+          # A tag can be moved to another image. A digest is a fingerprint of the
+          # content, so staging and production are certain to run the same bytes.
+          for service in catalog orders; do
+            image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/microshop-${service}"
+            digest=$(docker buildx imagetools inspect "${image}:${COMMIT}" --format '{{json .Manifest}}' | jq --raw-output --exit-status .digest)
+            echo "${service}=${image}@${digest}" | tee -a "$GITHUB_OUTPUT"
+          done
+          echo "commit=${COMMIT}" >> "$GITHUB_OUTPUT"
+
+  staging:
+    name: Staging
+    needs: find-images
+    permissions:
+      contents: read
+      id-token: write # needed for OIDC sign-in to Azure
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: staging
+      commit: ${{ needs.find-images.outputs.commit }}
+      catalog-image: ${{ needs.find-images.outputs.catalog }}
+      orders-image: ${{ needs.find-images.outputs.orders }}
+
+  production:
+    name: Production
+    needs: [find-images, staging] # only starts if staging and its smoke test passed
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/deploy.yml
+    with:
+      # GitHub pauses here for approval, as configured on the "production" environment.
+      environment: production
+      commit: ${{ needs.find-images.outputs.commit }}
+      catalog-image: ${{ needs.find-images.outputs.catalog }}
+      orders-image: ${{ needs.find-images.outputs.orders }}

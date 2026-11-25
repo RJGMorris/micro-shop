@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/MicroShop.AppHost/MicroShop.AppHost.csproj" />
+    <Project Path="src/MicroShop.ServiceDefaults/MicroShop.ServiceDefaults.csproj" />
+    <Project Path="src/Catalog.Api/Catalog.Api.csproj" />
+    <Project Path="src/Orders.Api/Orders.Api.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/MicroShop.UnitTests/MicroShop.UnitTests.csproj" />
+    <Project Path="tests/MicroShop.IntegrationTests/MicroShop.IntegrationTests.csproj" />
+  </Folder>
+</Solution>

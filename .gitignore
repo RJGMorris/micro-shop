@@ -1,0 +1,17 @@
+# Build output
+bin/
+obj/
+TestResults/
+artifacts/
+aspire-output/
+
+# IDE
+.vs/
+.idea/
+*.user
+
+# Never commit secrets or local settings
+.env
+*.pfx
+.claude/settings.local.json
+.aspire/

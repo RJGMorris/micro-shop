@@ -1,0 +1,136 @@
+# CONTINUOUS INTEGRATION: "is this code good?"
+#
+#   Pull request -> test, check infrastructure, build and scan the images
+#   Push to main -> the same, then PUSH the images to GitHub Container Registry
+#
+# CI has no access to Azure. Its output is a pair of tested images, tagged with
+# the git commit. CD (cd.yml) deploys those exact images and never rebuilds them.
+#
+# Actions are pinned to a commit SHA because a version tag can be moved to
+# malicious code. Dependabot proposes updates (.github/dependabot.yml).
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Least privilege: read-only by default. Jobs ask for more only if they need it.
+permissions:
+  contents: read
+
+# A new push to a pull request cancels the outdated run. Runs on main always finish.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          global-json-file: global.json
+
+      # Cheapest checks first, so mistakes are reported quickly.
+      # Restore also fails on packages with high or critical vulnerabilities.
+      - name: Restore
+        run: dotnet restore MicroShop.slnx
+
+      - name: Check formatting
+        run: dotnet format MicroShop.slnx --verify-no-changes --no-restore
+
+      - name: Build
+        run: dotnet build MicroShop.slnx --configuration Release --no-restore
+
+      - name: Unit tests
+        run: >
+          dotnet test tests/MicroShop.UnitTests --configuration Release --no-build
+          --logger "trx;LogFileName=unit.trx" --results-directory TestResults
+
+      # Starts both services for real, through the Aspire AppHost.
+      - name: Integration tests
+        run: >
+          dotnet test tests/MicroShop.IntegrationTests --configuration Release --no-build
+          --logger "trx;LogFileName=integration.trx" --results-directory TestResults
+
+      - name: Upload test results
+        if: always() # most useful when a test failed
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-results
+          path: TestResults
+
+  infrastructure:
+    name: Check infrastructure
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Compiles the Bicep without signing in to Azure.
+      - name: Compile Bicep
+        run: az bicep build --file infra/main.bicep --stdout > /dev/null
+
+  image:
+    name: Image (${{ matrix.service }})
+    needs: [test, infrastructure]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write # push to GitHub Container Registry
+    strategy:
+      matrix:
+        include:
+          - service: catalog
+            project: Catalog.Api
+          - service: orders
+            project: Orders.Api
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Image names must be lowercase, but GitHub account names may not be.
+      - name: Choose image name
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/microshop-${SERVICE}:${GITHUB_SHA}" >> "$GITHUB_ENV"
+        env:
+          SERVICE: ${{ matrix.service }}
+
+      - name: Build image
+        run: >
+          docker build .
+          --file "src/${PROJECT}/Dockerfile"
+          --build-arg "APP_VERSION=${GITHUB_SHA}"
+          --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          --label "org.opencontainers.image.revision=${GITHUB_SHA}"
+          --tag "${IMAGE}"
+        env:
+          PROJECT: ${{ matrix.project }}
+
+      # Scan BEFORE pushing, so a vulnerable image is never published.
+      - name: Scan image for vulnerabilities
+        uses: anchore/scan-action@11983a512817154c80a9db660c1a184be7513ed6 # v7.4.3
+        with:
+          image: ${{ env.IMAGE }}
+          severity-cutoff: high
+          only-fixed: true # fail only for problems that an update would solve
+          output-format: table
+
+      - name: Push image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          echo "${GH_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+          docker push "${IMAGE}"
+        env:
+          GH_TOKEN: ${{ github.token }}

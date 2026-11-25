@@ -1,0 +1,82 @@
+# Reusable: deploys one version to one environment. Called by cd.yml for staging and
+# then production, so both are deployed in exactly the same way.
+
+name: Deploy
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+      commit:
+        required: true
+        type: string
+      catalog-image:
+        required: true
+        type: string
+      orders-image:
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  deploy:
+    name: Deploy to ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: ${{ inputs.environment }}
+      url: ${{ steps.deploy.outputs.url }}
+    permissions:
+      contents: read
+      id-token: write
+    # Never run two deployments to the same environment at once.
+    concurrency:
+      group: deploy-${{ inputs.environment }}
+      cancel-in-progress: false
+    steps:
+      # Check out the RELEASED commit, so the infrastructure matches the images.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.commit }}
+          persist-credentials: false
+
+      # OIDC: GitHub issues a short-lived token that Azure trusts, so there is no
+      # password to store, leak or rotate.
+      - name: Sign in to Azure
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy
+        id: deploy
+        env:
+          RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          COMMIT: ${{ inputs.commit }}
+          CATALOG_IMAGE: ${{ inputs.catalog-image }}
+          ORDERS_IMAGE: ${{ inputs.orders-image }}
+        run: |
+          url=$(az deployment group create \
+            --name "microshop-${COMMIT}" \
+            --resource-group "$RESOURCE_GROUP" \
+            --template-file infra/main.bicep \
+            --parameters \
+              environmentName="$ENVIRONMENT" \
+              catalogImage="$CATALOG_IMAGE" \
+              ordersImage="$ORDERS_IMAGE" \
+            --query properties.outputs.ordersUrl.value \
+            --output tsv)
+          echo "url=${url}" >> "$GITHUB_OUTPUT"
+          echo "Deployed to ${url}" >> "$GITHUB_STEP_SUMMARY"
+
+      # A successful deployment is not proof of a working system, so ask the system.
+      - name: Smoke test
+        env:
+          URL: ${{ steps.deploy.outputs.url }}
+          COMMIT: ${{ inputs.commit }}
+        run: bash scripts/smoke-test.sh "$URL" "$COMMIT"

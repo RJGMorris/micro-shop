@@ -1,0 +1,16 @@
+<!-- Settings shared by every project. MSBuild imports this file automatically. -->
+<Project>
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+
+    <!-- Quality gate: a warning fails the build, locally and in CI. -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+
+    <!-- Supply-chain gate: restore checks packages against known vulnerabilities.
+         High (NU1903) and critical (NU1904) fail the build; the rest only warn. -->
+    <NuGetAuditMode>all</NuGetAuditMode>
+    <WarningsNotAsErrors>NU1901;NU1902</WarningsNotAsErrors>
+  </PropertyGroup>
+</Project>
